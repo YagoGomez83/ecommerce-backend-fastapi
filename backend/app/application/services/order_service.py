@@ -12,8 +12,9 @@ from sqlalchemy import update
 from app.infrastructure.repositories.order_repository import OrderRepository
 from app.infrastructure.repositories.product_repository import ProductRepository
 from app.infrastructure.repositories.stock_repository import StockRepository
-from app.infrastructure.database.models import Order, OrderItem, StockMovement, StockMovementType, Product
+from app.infrastructure.database.models import Order, OrderItem, OrderStatus, StockMovement, StockMovementType, Product
 from app.schemas.order import OrderCreate, OrderResponse
+from app.schemas.stock_movement import StockMovementCreate
 
 
 class OrderService:
@@ -138,7 +139,7 @@ class OrderService:
         order = Order(
             order_number=order_number,
             user_id=user_id,
-            status="PENDING",
+            status=OrderStatus.PENDING,
             subtotal=float(subtotal),
             tax=float(tax),
             shipping_cost=float(shipping_cost),
@@ -195,3 +196,94 @@ class OrderService:
             Orden si existe, None en caso contrario
         """
         return await self.order_repo.get_by_id(order_id)
+    
+    async def update_status(self, order_id: int, new_status: OrderStatus) -> Order:
+        """
+        Actualiza el estado de una orden con validaciones de negocio.
+        
+        Implementa la máquina de estados finita:
+        - PENDING -> CONFIRMED o CANCELLED
+        - CONFIRMED -> SHIPPED
+        - SHIPPED -> DELIVERED
+        - Si se cancela (CANCELLED) y no está DELIVERED, devuelve el stock automáticamente
+        
+        Args:
+            order_id: ID de la orden a actualizar
+            new_status: Nuevo estado de la orden
+            
+        Returns:
+            Orden actualizada
+            
+        Raises:
+            HTTPException: Si la orden no existe o hay un error en la transición
+        """
+        db = self.order_repo.db
+        
+        # Obtener la orden actual con sus items
+        order = await self.order_repo.get_by_id(order_id)
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Orden con ID {order_id} no encontrada"
+            )
+        
+        current_status = order.status
+        
+        # Si se cancela y NO está DELIVERED, devolver el stock
+        if new_status == OrderStatus.CANCELLED and current_status != OrderStatus.DELIVERED:
+            # Iterar sobre los items de la orden y devolver el stock
+            for item in order.order_items:
+                # Crear movimiento de stock de tipo ENTRADA (devolución)
+                movement_in = StockMovementCreate(
+                    product_id=item.product_id,
+                    movement_type=StockMovementType.ENTRADA,
+                    quantity=item.quantity,
+                    reason=f"Cancelación Orden {order.order_number}",
+                    notes=f"Devolución de stock por cancelación de orden"
+                )
+                
+                # Obtener producto actual para el stock
+                product = await self.product_repo.get_by_id(item.product_id)
+                if product:
+                    # Crear el movimiento de stock
+                    stock_movement = StockMovement(
+                        product_id=item.product_id,
+                        movement_type=StockMovementType.ENTRADA,
+                        quantity=item.quantity,
+                        stock_before=product.stock_actual,
+                        stock_after=product.stock_actual + item.quantity,
+                        reason=movement_in.reason,
+                        notes=movement_in.notes
+                    )
+                    db.add(stock_movement)
+                    
+                    # Actualizar el stock del producto
+                    from sqlalchemy import update
+                    stmt = (
+                        update(Product)
+                        .where(Product.id == item.product_id)
+                        .values(stock_actual=product.stock_actual + item.quantity)
+                    )
+                    await db.execute(stmt)
+        
+        # Actualizar el estado de la orden
+        order.status = new_status
+        
+        # Hacer commit de los cambios
+        await db.commit()
+        
+        # Recargar la orden con sus relaciones
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        
+        query = (
+            select(Order)
+            .where(Order.id == order.id)
+            .options(
+                selectinload(Order.order_items).selectinload(OrderItem.product)
+            )
+        )
+        result = await db.execute(query)
+        refreshed_order = result.scalar_one()
+        
+        return refreshed_order

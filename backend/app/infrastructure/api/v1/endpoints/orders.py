@@ -7,9 +7,9 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.schemas.order import OrderCreate, OrderResponse, OrderItemResponse
+from app.schemas.order import OrderCreate, OrderResponse, OrderItemResponse, OrderUpdateStatus
 from app.application.services.order_service import OrderService
-from app.infrastructure.api.v1.deps import get_order_service, get_current_user
+from app.infrastructure.api.v1.deps import get_order_service, get_current_user, get_current_admin
 from app.infrastructure.database.models import User
 
 
@@ -135,3 +135,72 @@ async def get_my_orders(
         )
     
     return orders_response
+
+
+@router.patch(
+    "/{order_id}/status",
+    response_model=OrderResponse,
+    summary="Actualizar estado de orden"
+)
+async def update_order_status(
+    order_id: int,
+    status_in: OrderUpdateStatus,
+    service: Annotated[OrderService, Depends(get_order_service)],
+    current_admin: Annotated[User, Depends(get_current_admin)]
+) -> OrderResponse:
+    """
+    Actualiza el estado de una orden. Solo accesible por administradores.
+    
+    Implementa una máquina de estados finita con las siguientes transiciones:
+    - PENDING -> CONFIRMED o CANCELLED
+    - CONFIRMED -> SHIPPED
+    - SHIPPED -> DELIVERED
+    
+    Si se cancela una orden (status=CANCELLED) y no está DELIVERED,
+    el sistema automáticamente devuelve el stock de todos los productos.
+    
+    Args:
+        order_id: ID de la orden a actualizar
+        status_in: Nuevo estado de la orden
+        service: Servicio de órdenes
+        current_admin: Usuario administrador autenticado
+        
+    Returns:
+        Orden actualizada con el nuevo estado
+        
+    Raises:
+        HTTPException: Si la orden no existe (404) o hay error en la transición
+    """
+    try:
+        order = await service.update_status(order_id, status_in.status)
+        
+        # Convertir a OrderResponse
+        items_response = [
+            OrderItemResponse(
+                product_id=item.product_id,
+                product_name=item.product.name,
+                quantity=item.quantity,
+                unit_price=Decimal(str(item.unit_price)),
+                subtotal=Decimal(str(item.subtotal))
+            )
+            for item in order.order_items
+        ]
+        
+        return OrderResponse(
+            id=order.id,
+            order_number=order.order_number,
+            status=order.status,
+            total=Decimal(str(order.total)),
+            created_at=order.created_at,
+            items=items_response,
+            shipping_address=order.shipping_address,
+            shipping_city=order.shipping_city
+        )
+    except HTTPException:
+        # Re-lanzar excepciones HTTP tal cual
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al actualizar el estado de la orden: {str(e)}"
+        )

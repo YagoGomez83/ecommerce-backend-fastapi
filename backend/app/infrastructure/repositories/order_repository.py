@@ -30,6 +30,28 @@ class OrderRepository(BaseRepository[Order, OrderCreate, OrderResponse]):
         """
         super().__init__(Order, db)
     
+    async def get_by_id(self, id: int) -> Order | None:
+        """
+        Obtiene una orden por ID cargando sus relaciones.
+        Sobrescribe el método genérico para asegurar Eager Loading.
+        
+        Args:
+            id: ID de la orden
+            
+        Returns:
+            Orden con items y productos cargados, o None si no existe
+        """
+        query = (
+            select(Order)
+            .where(Order.id == id)
+            .options(
+                # Trae los items y dentro de ellos, el producto
+                selectinload(Order.order_items).selectinload(OrderItem.product)
+            )
+        )
+        result = await self.db.execute(query)
+        return result.scalar_one_or_none()
+    
     async def get_by_user(self, user_id: int) -> List[Order]:
         """
         Obtiene todas las órdenes de un usuario específico.

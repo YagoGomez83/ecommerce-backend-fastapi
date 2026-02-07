@@ -49,3 +49,9 @@ class OrderResponse(MyBaseModel):
     items: List[OrderItemResponse]
     shipping_address: Optional[str] = None
     shipping_city: Optional[str] = None
+
+
+class OrderUpdateStatus(MyBaseModel):
+    """Esquema para actualizar el estado de una orden."""
+    
+    status: OrderStatus
